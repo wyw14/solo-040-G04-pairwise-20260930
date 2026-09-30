@@ -11,6 +11,7 @@ import (
 	"github.com/wyw14/cry-96/internal/interlock"
 	"github.com/wyw14/cry-96/internal/journal"
 	"github.com/wyw14/cry-96/internal/lease"
+	"github.com/wyw14/cry-96/internal/lockout"
 	"github.com/wyw14/cry-96/internal/model"
 	"github.com/wyw14/cry-96/internal/monitor"
 	"github.com/wyw14/cry-96/internal/safety"
@@ -38,6 +39,7 @@ type Runtime struct {
 	CycleService    *cycle.Service
 	Leases          *lease.Service
 	LeaseSweeper    *lease.Sweeper
+	Lockouts        *lockout.Service
 	Safety          *safety.Service
 	Snapshot        *monitor.Snapshot
 	Incidents       *monitor.IncidentReview
@@ -57,7 +59,11 @@ func NewRuntime(ctx context.Context, dataDirectory string) (*Runtime, error) {
 	chambers := []string{"chamber-1", "chamber-2"}
 	gateState := gate.NewState(chambers...)
 	gateCommands := gate.NewCommands()
-	gateController := gate.NewController(gateState, gateCommands, recorder, now)
+	// Lockout registry is created before any command controller so the guard
+	// injected below enforces maintenance lockouts from the first command.
+	lockoutRegistry := lockout.NewRegistry(gateCommands.HasPendingDevice)
+	lockoutService := lockout.NewService(lockoutRegistry, recorder, now)
+	gateController := gate.NewController(gateState, gateCommands, recorder, now, lockoutService.Guard)
 	signalStore := signal.NewStore()
 	signalPublisher := signal.NewPublisher(signalStore, recorder, now)
 	signalService := signal.NewService(signalStore)
@@ -70,7 +76,7 @@ func NewRuntime(ctx context.Context, dataDirectory string) (*Runtime, error) {
 	planner := schedule.NewPlanner(admissionService, recorder, now)
 	scheduleService := schedule.NewService(planner, signalPublisher)
 	ramp := hydraulics.NewRamp(25*time.Millisecond, now)
-	hydraulicsController := hydraulics.NewController(gateCommands, recorder, ramp, now)
+	hydraulicsController := hydraulics.NewController(gateCommands, recorder, ramp, now, lockoutService.Guard)
 	barrier := safety.NewBarrier()
 	var safetyCoordinator *safety.Coordinator
 	levelByChamber := func(chamberID string) float64 {
@@ -97,6 +103,10 @@ func NewRuntime(ctx context.Context, dataDirectory string) (*Runtime, error) {
 	if _, err := recovery.RestoreAll(ctx); err != nil {
 		return nil, err
 	}
+	lockoutRecovery := lockout.NewRecovery(replayer, lockoutRegistry)
+	if _, err := lockoutRecovery.RestoreAll(ctx); err != nil {
+		return nil, err
+	}
 	health := monitor.NewHealthRegistry()
 	for _, chamberID := range chambers {
 		for _, device := range []model.DeviceKind{
@@ -113,8 +123,9 @@ func NewRuntime(ctx context.Context, dataDirectory string) (*Runtime, error) {
 		AdmissionQueue: admissionController.Queue(), Admission: admissionService,
 		Planner: planner, Schedule: scheduleService, Hydraulics: hydraulicsController,
 		Interlocks: interlockCoordinator, Cycles: cycleCoordinator, CycleService: cycleService,
-		Leases: leaseService, LeaseSweeper: leaseSweeper, Safety: safetyService,
-		Snapshot:  monitor.NewSnapshot(cycleCoordinator, gateState, admissionService, signalService, safetyService, now),
+		Leases: leaseService, LeaseSweeper: leaseSweeper, Lockouts: lockoutService,
+		Safety:    safetyService,
+		Snapshot:  monitor.NewSnapshot(cycleCoordinator, gateState, admissionService, signalService, safetyService, lockoutService, now),
 		Incidents: monitor.NewIncidentReview(store), Health: health, Recovery: recovery,
 		Chambers: chambers, Now: now,
 	}, nil

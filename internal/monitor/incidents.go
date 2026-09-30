@@ -60,6 +60,14 @@ func incidentMeaning(kind model.EventType) (string, string, bool) {
 		return "critical", "Emergency stop requested", true
 	case model.EventEmergencySettled:
 		return "notice", "Emergency equipment reached stable state", true
+	case model.EventCommandBlocked:
+		return "warning", "Actuator command blocked by maintenance lockout", true
+	case model.EventLockoutRequested:
+		return "notice", "Maintenance lockout registered, awaiting approval", true
+	case model.EventLockoutApproved:
+		return "warning", "Maintenance lockout approved and in force", true
+	case model.EventLockoutReleased:
+		return "notice", "Maintenance lockout released", true
 	case model.EventReplayWarning:
 		return "warning", "Recovery sequence requires review", true
 	case model.EventPlanCancelled:

@@ -11,6 +11,11 @@ import (
 	"github.com/wyw14/cry-96/internal/signal"
 )
 
+// LockoutLister returns active maintenance lockouts for a chamber.
+type LockoutLister interface {
+	Active(chamberID string) []model.MaintenanceLock
+}
+
 type ChamberView struct {
 	ChamberID string                                 `json:"chamber_id"`
 	Cycle     *model.TransitCycle                    `json:"cycle,omitempty"`
@@ -18,24 +23,26 @@ type ChamberView struct {
 	Queue     []admission.QueueEntry                 `json:"queue"`
 	Signals   []model.SignalState                    `json:"signals"`
 	Emergency model.EmergencyRecord                  `json:"emergency"`
+	Lockouts  []model.MaintenanceLock                `json:"lockouts"`
 	UpdatedAt time.Time                              `json:"updated_at"`
 }
 
 // Snapshot aggregates current responsibilities without taking ownership.
 type Snapshot struct {
-	cycles  *cycle.Coordinator
-	gates   *gate.State
-	queue   *admission.Service
-	signals *signal.Service
-	safety  *safety.Service
-	now     func() time.Time
+	cycles   *cycle.Coordinator
+	gates    *gate.State
+	queue    *admission.Service
+	signals  *signal.Service
+	safety   *safety.Service
+	lockouts LockoutLister
+	now      func() time.Time
 }
 
-func NewSnapshot(cycles *cycle.Coordinator, gates *gate.State, queue *admission.Service, signals *signal.Service, safetyService *safety.Service, now func() time.Time) *Snapshot {
+func NewSnapshot(cycles *cycle.Coordinator, gates *gate.State, queue *admission.Service, signals *signal.Service, safetyService *safety.Service, lockouts LockoutLister, now func() time.Time) *Snapshot {
 	if now == nil {
 		now = time.Now
 	}
-	return &Snapshot{cycles: cycles, gates: gates, queue: queue, signals: signals, safety: safetyService, now: now}
+	return &Snapshot{cycles: cycles, gates: gates, queue: queue, signals: signals, safety: safetyService, lockouts: lockouts, now: now}
 }
 
 func (s *Snapshot) Chamber(chamberID string) ChamberView {
@@ -43,6 +50,9 @@ func (s *Snapshot) Chamber(chamberID string) ChamberView {
 		ChamberID: chamberID, Gates: s.gates.Snapshot(chamberID),
 		Queue: s.queue.List(chamberID), Signals: s.signals.States(),
 		Emergency: s.safety.Status(chamberID), UpdatedAt: s.now().UTC(),
+	}
+	if s.lockouts != nil {
+		view.Lockouts = s.lockouts.Active(chamberID)
 	}
 	if cycleValue, ok := s.cycles.Current(chamberID); ok {
 		view.Cycle = &cycleValue

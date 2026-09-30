@@ -10,6 +10,9 @@ import (
 )
 
 // Coordinator keeps policy evaluation and command reservation in one flow.
+// Maintenance lockouts are enforced atomically by the gate controller's guard
+// (inside the reservation commit), so a rejected open is journaled there with
+// its reason and never leaves a reservation behind.
 type Coordinator struct {
 	policy    Policy
 	arbiter   *Arbiter

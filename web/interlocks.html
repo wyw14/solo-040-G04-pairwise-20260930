@@ -1,10 +1,89 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LockFlow Interlocks</title><link rel="stylesheet" href="/assets/styles.css"></head>
 <body><header><div class="brand"><span class="brand-mark">LF</span>LockFlow</div><nav><a href="/operations">Operations</a><a href="/chamber">Chamber</a><a aria-current="page" href="/interlocks">Interlocks</a><a href="/incidents">Incidents</a></nav></header>
-<main><div class="page-title"><div><h1>Interlock control</h1><div class="muted">Mutual exclusion and emergency equipment state</div></div></div><div class="grid" id="interlock-grid"></div><div class="message" id="message"></div></main>
+<main>
+  <div class="page-title"><div><h1>Interlock control</h1><div class="muted">Mutual exclusion, emergency equipment and maintenance lockouts</div></div><button id="refresh">Refresh</button></div>
+  <div class="message" id="message"></div>
+  <div class="grid">
+    <section class="panel"><h2>Register maintenance lockout</h2><form id="lockout-form">
+      <div class="form-row"><div><label for="lo-chamber">Chamber</label><select id="lo-chamber"><option>chamber-1</option><option>chamber-2</option></select></div></div>
+      <div class="form-row"><div><label>Devices</label><div id="lo-devices" class="checkboxes">
+        <label class="check"><input type="checkbox" value="upstream_gate" checked> Upstream gate</label>
+        <label class="check"><input type="checkbox" value="downstream_gate"> Downstream gate</label>
+        <label class="check"><input type="checkbox" value="fill_valve"> Fill valve</label>
+        <label class="check"><input type="checkbox" value="drain_valve"> Drain valve</label>
+      </div></div></div>
+      <div class="form-row"><div><label for="lo-reason">Reason</label><input id="lo-reason" placeholder="Seal replacement on upstream gate"></div><div><label for="lo-by">Technician</label><input id="lo-by" placeholder="tech-12"></div></div>
+      <button type="submit">Register</button>
+    </form></section>
+    <section class="panel"><h2>Chamber equipment</h2><div id="chamber-grid"></div></section>
+    <section class="panel wide"><h2>Maintenance lockouts</h2><table><thead><tr><th>Status</th><th>Chamber</th><th>Devices</th><th>Reason</th><th>Requested by</th><th>Approved by</th><th>Actions</th></tr></thead><tbody id="lockouts"></tbody></table></section>
+  </div>
+</main>
 <script src="/assets/app.js"></script><script>
-const {api,setMessage,withBusy}=window.LockFlow; const host=document.querySelector('#interlock-grid'); const message=document.querySelector('#message');
+const {api,setMessage,withBusy}=window.LockFlow;
+const message=document.querySelector('#message');
+const deviceLabel={upstream_gate:'upstream gate',downstream_gate:'downstream gate',fill_valve:'fill valve',drain_valve:'drain valve'};
+
+async function registerLockout(event){
+  event.preventDefault();
+  const devices=[...document.querySelectorAll('#lo-devices input:checked')].map((c)=>c.value);
+  const body={chamber_id:document.querySelector('#lo-chamber').value,devices,
+    reason:document.querySelector('#lo-reason').value,requested_by:document.querySelector('#lo-by').value};
+  const button=event.target.querySelector('button');
+  await withBusy(button,async()=>{
+    try{await api('/api/lockouts',{method:'POST',body:JSON.stringify(body)});document.querySelector('#lo-reason').value='';await load();}
+    catch(e){setMessage(message,e.message);}
+  });
+}
+
+async function transition(lock,path,promptText,button){
+  const who=prompt(promptText);
+  if(who===null)return;
+  const field=path==='approve'?'approved_by':'released_by';
+  const payload={[field]:who};
+  if(path==='release'){const note=prompt('Release note (optional):','');payload.note=note||'';}
+  await withBusy(button,async()=>{
+    try{await api(`/api/lockouts/${lock.id}/${path}`,{method:'POST',body:JSON.stringify(payload)});await load();}
+    catch(e){setMessage(message,e.message);}
+  });
+}
+
 async function stop(chamber,button){await withBusy(button,async()=>{try{await api(`/api/chambers/${chamber}/emergency`,{method:'POST',body:'{}'});await load();}catch(e){setMessage(message,e.message);}});}
-async function load(){const data=await api('/api/interlocks');host.innerHTML=Object.entries(data).map(([id,item])=>`<section class="panel"><h2>${id}</h2><table><tr><th>Emergency</th><td>${item.emergency.status}</td></tr><tr><th>Level</th><td>${item.equipment.LevelM??item.equipment.level_m??0} m</td></tr><tr><th>Pending commands</th><td>${item.pending_commands.length}</td></tr></table><button class="danger" data-stop="${id}">Emergency stop</button></section>`).join('');host.querySelectorAll('[data-stop]').forEach((button)=>button.addEventListener('click',()=>stop(button.dataset.stop,button)));}
+
+function esc(value){return String(value??'').replace(/[&<>"]/g,(m)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));}
+
+async function load(){
+  setMessage(message,'');
+  const [inter,lockouts]=await Promise.all([api('/api/interlocks'),api('/api/lockouts')]);
+  document.querySelector('#chamber-grid').innerHTML=Object.entries(inter)
+    .filter(([id])=>id.startsWith('chamber'))
+    .map(([id,item])=>{
+      const active=(item.lockouts||[]).map((l)=>`${l.devices.map((d)=>deviceLabel[d]||d).join(', ')}: ${esc(l.reason)}`);
+      return `<div class="lock-chamber"><h3>${id}</h3><table>
+        <tr><th>Emergency</th><td>${item.emergency.status}</td></tr>
+        <tr><th>Level</th><td>${item.equipment.LevelM??item.equipment.level_m??0} m</td></tr>
+        <tr><th>Pending commands</th><td>${item.pending_commands.length}</td></tr>
+        <tr><th>Active lockouts</th><td>${active.length?active.map((a)=>`⚠ ${a}`).join('<br>'):'none'}</td></tr></table>
+        <button class="danger" data-stop="${id}">Emergency stop</button></div>`;
+    }).join('');
+  document.querySelector('#chamber-grid').querySelectorAll('[data-stop]').forEach((b)=>b.addEventListener('click',()=>stop(b.dataset.stop,b)));
+
+  document.querySelector('#lockouts').innerHTML=(lockouts.length?lockouts:[]).map((l)=>{
+    let actions='<span class="muted">-</span>';
+    if(l.status==='requested')actions=`<button data-approve="${l.id}">Approve</button>`;
+    if(l.status==='active')actions=`<button class="danger" data-release="${l.id}">Release</button>`;
+    return `<tr><td><span class="status ${l.status==='active'?'critical':l.status==='requested'?'warning':''}">${l.status}</span></td>
+      <td>${l.chamber_id}</td><td>${l.devices.map((d)=>deviceLabel[d]||d).join(', ')}</td>
+      <td>${esc(l.reason)}</td><td>${esc(l.requested_by)}</td><td>${esc(l.approved_by)||'-'}</td><td>${actions}</td></tr>`;
+  }).join('')||'<tr><td colspan="7" class="muted">No maintenance lockouts registered</td></tr>';
+  document.querySelector('#lockouts').querySelectorAll('[data-approve]').forEach((b)=>b.addEventListener('click',()=>{
+    const lock=lockouts.find((x)=>x.id===b.dataset.approve);transition(lock,'approve','Approving officer name:',b);}));
+  document.querySelector('#lockouts').querySelectorAll('[data-release]').forEach((b)=>b.addEventListener('click',()=>{
+    const lock=lockouts.find((x)=>x.id===b.dataset.release);transition(lock,'release','Releasing operator name:',b);}));
+}
+
+document.querySelector('#lockout-form').addEventListener('submit',registerLockout);
+document.querySelector('#refresh').addEventListener('click',()=>load().catch((e)=>setMessage(message,e.message)));
 load().catch((e)=>setMessage(message,e.message));
 </script></body></html>

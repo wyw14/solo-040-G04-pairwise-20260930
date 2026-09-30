@@ -19,7 +19,7 @@ func openGateHandler(runtime *Runtime) http.HandlerFunc {
 		}
 		command, err := runtime.Interlocks.RequestOpen(r.Context(), mustCurrent(runtime, chamberID), direction, "http:"+requestID(r.Context()))
 		if err != nil {
-			writeError(w, http.StatusConflict, err)
+			writeCommandError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusAccepted, command)

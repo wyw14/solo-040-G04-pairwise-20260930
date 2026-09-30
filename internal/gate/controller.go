@@ -14,14 +14,15 @@ type Controller struct {
 	state    *State
 	commands *Commands
 	recorder *journal.Recorder
+	guard    model.DeviceGuard
 	now      func() time.Time
 }
 
-func NewController(state *State, commands *Commands, recorder *journal.Recorder, now func() time.Time) *Controller {
+func NewController(state *State, commands *Commands, recorder *journal.Recorder, now func() time.Time, guard model.DeviceGuard) *Controller {
 	if now == nil {
 		now = time.Now
 	}
-	return &Controller{state: state, commands: commands, recorder: recorder, now: now}
+	return &Controller{state: state, commands: commands, recorder: recorder, guard: guard, now: now}
 }
 
 func (c *Controller) Request(ctx context.Context, cycle model.TransitCycle, direction model.Direction, open bool) (model.DeviceCommand, error) {
@@ -38,15 +39,34 @@ func (c *Controller) Request(ctx context.Context, cycle model.TransitCycle, dire
 		action = "open"
 		position = model.GateOpening
 	}
-	command, err := c.commands.Issue(cycle, device, action, 0, c.now())
-	if err != nil {
+	var command model.DeviceCommand
+	commit := func() error {
+		issued, err := c.commands.Issue(cycle, device, action, 0, c.now())
+		if err != nil {
+			return err
+		}
+		if err := c.state.Observe(cycle.ChamberID, direction, position, c.now()); err != nil {
+			return err
+		}
+		if _, err := c.recorder.Record(ctx, cycle.ChamberID, model.EventCommandQueued, cycle.ID, cycle.Generation, issued); err != nil {
+			return err
+		}
+		command = issued
+		return nil
+	}
+	// The lockout check, command issue and journal append share one critical
+	// section with lockout approval/release, so no command can slip through in
+	// the gap between the check and the issue.
+	if c.guard != nil {
+		if err := c.guard(ctx, cycle.ChamberID, device, action, "gate:"+string(direction), commit); err != nil {
+			return model.DeviceCommand{}, err
+		}
+		return command, nil
+	}
+	if err := commit(); err != nil {
 		return model.DeviceCommand{}, err
 	}
-	if err := c.state.Observe(cycle.ChamberID, direction, position, c.now()); err != nil {
-		return model.DeviceCommand{}, err
-	}
-	_, err = c.recorder.Record(ctx, cycle.ChamberID, model.EventCommandQueued, cycle.ID, cycle.Generation, command)
-	return command, err
+	return command, nil
 }
 
 func (c *Controller) Confirm(ctx context.Context, ack model.DeviceAck) (model.DeviceCommand, error) {

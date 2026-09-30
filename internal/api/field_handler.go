@@ -25,7 +25,7 @@ func closeGateHandler(runtime *Runtime) http.HandlerFunc {
 		}
 		command, err := runtime.Interlocks.RequestClose(r.Context(), cycleValue, direction)
 		if err != nil {
-			writeError(w, http.StatusConflict, err)
+			writeCommandError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusAccepted, command)

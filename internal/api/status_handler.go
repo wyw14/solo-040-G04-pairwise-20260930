@@ -28,6 +28,7 @@ func interlocksHandler(runtime *Runtime) http.HandlerFunc {
 				"pending_commands":  runtime.GateCommands.Pending(chamberID),
 				"pending_equipment": runtime.Safety.Barrier().Pending(chamberID),
 				"reservation":       reservationValue,
+				"lockouts":          runtime.Lockouts.Active(chamberID),
 			}
 		}
 		result["signal_handoffs"] = runtime.Signals.History()

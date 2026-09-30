@@ -18,16 +18,17 @@ type Controller struct {
 	recorder *journal.Recorder
 	windows  map[string]*LevelWindow
 	ramp     *Ramp
+	guard    model.DeviceGuard
 	now      func() time.Time
 }
 
-func NewController(commands *gate.Commands, recorder *journal.Recorder, ramp *Ramp, now func() time.Time) *Controller {
+func NewController(commands *gate.Commands, recorder *journal.Recorder, ramp *Ramp, now func() time.Time, guard model.DeviceGuard) *Controller {
 	if now == nil {
 		now = time.Now
 	}
 	return &Controller{
 		commands: commands, recorder: recorder, windows: make(map[string]*LevelWindow),
-		ramp: ramp, now: now,
+		ramp: ramp, guard: guard, now: now,
 	}
 }
 
@@ -84,12 +85,20 @@ func (c *Controller) IssueValve(ctx context.Context, cycle model.TransitCycle, t
 		device = model.DeviceDrainValve
 		target = -target
 	}
-	command, err := c.commands.Issue(cycle, device, "set_opening", target, c.now())
-	if err != nil {
+	commit := func() error {
+		command, err := c.commands.Issue(cycle, device, "set_opening", target, c.now())
+		if err != nil {
+			return err
+		}
+		_, err = c.recorder.Record(ctx, cycle.ChamberID, model.EventCommandQueued, cycle.ID, cycle.Generation, command)
 		return err
 	}
-	_, err = c.recorder.Record(ctx, cycle.ChamberID, model.EventCommandQueued, cycle.ID, cycle.Generation, command)
-	return err
+	// Re-checked on every ramp step: an approval landing mid-ramp stops the
+	// following step rather than waiting for the whole ramp to finish.
+	if c.guard != nil {
+		return c.guard(ctx, cycle.ChamberID, device, "set_opening", "valve:ramp", commit)
+	}
+	return commit()
 }
 
 func (c *Controller) RampTo(ctx context.Context, cycle model.TransitCycle, targets []float64) (RampResult, error) {

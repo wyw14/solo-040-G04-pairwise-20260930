@@ -116,6 +116,20 @@ func (c *Commands) Pending(chamberID string) []model.DeviceCommand {
 	return pending
 }
 
+// HasPendingDevice reports whether a specific device has a non-terminal command.
+// It gates maintenance-lockout release: a locked device must be quiescent first.
+func (c *Commands) HasPendingDevice(chamberID string, device model.DeviceKind) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, commandID := range c.byChamber[chamberID] {
+		command := c.byID[commandID]
+		if command.Device == device && !command.State.Terminal() {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Commands) Get(commandID uuid.UUID) (model.DeviceCommand, bool) {
 	c.mu.RLock()
 	command, ok := c.byID[commandID]
