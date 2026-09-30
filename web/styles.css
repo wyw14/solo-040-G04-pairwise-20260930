@@ -53,6 +53,13 @@ th { color: #91a0a8; font-weight: 600; }
 .status.warning::before { background: #f2c14e; }
 .status.critical::before { background: #ef6f6c; }
 .message { min-height: 22px; color: #f2c14e; font-size: 13px; margin-top: 10px; white-space: pre-wrap; }
+h3 { font-size: 14px; margin: 18px 0 8px; color: #cdd7dd; }
+.inline { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.inline input { width: auto; min-width: 110px; min-height: 32px; }
+.inline button { min-height: 32px; padding: 4px 10px; white-space: nowrap; }
+.device-row { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 8px; }
+label.check { display: inline-flex; align-items: center; gap: 6px; margin: 0; font-size: 13px; }
+label.check input { width: auto; min-height: 0; }
 @media (max-width: 780px) {
   header { height: auto; padding: 14px 18px; align-items: flex-start; flex-direction: column; gap: 10px; }
   main { padding: 20px 16px 40px; }

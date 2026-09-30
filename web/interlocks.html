@@ -1,10 +1,96 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>LockFlow Interlocks</title><link rel="stylesheet" href="/assets/styles.css"></head>
 <body><header><div class="brand"><span class="brand-mark">LF</span>LockFlow</div><nav><a href="/operations">Operations</a><a href="/chamber">Chamber</a><a aria-current="page" href="/interlocks">Interlocks</a><a href="/incidents">Incidents</a></nav></header>
-<main><div class="page-title"><div><h1>Interlock control</h1><div class="muted">Mutual exclusion and emergency equipment state</div></div></div><div class="grid" id="interlock-grid"></div><div class="message" id="message"></div></main>
+<main><div class="page-title"><div><h1>Interlock control</h1><div class="muted">Maintenance lockouts, mutual exclusion and emergency equipment state</div></div><span class="status" id="health">Refreshing</span></div>
+<div class="grid" id="interlock-grid"></div><div class="message" id="message"></div></main>
 <script src="/assets/app.js"></script><script>
-const {api,setMessage,withBusy}=window.LockFlow; const host=document.querySelector('#interlock-grid'); const message=document.querySelector('#message');
+const {api,shortID,setMessage,withBusy}=window.LockFlow;
+const host=document.querySelector('#interlock-grid'); const message=document.querySelector('#message');
+const health=document.querySelector('#health');
+const DEVICES=[['upstream_gate','Upstream gate'],['downstream_gate','Downstream gate'],['fill_valve','Fill valve'],['drain_valve','Drain valve']];
+const esc=(v)=>String(v??'').replace(/[&<>"']/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
 async function stop(chamber,button){await withBusy(button,async()=>{try{await api(`/api/chambers/${chamber}/emergency`,{method:'POST',body:'{}'});await load();}catch(e){setMessage(message,e.message);}});}
-async function load(){const data=await api('/api/interlocks');host.innerHTML=Object.entries(data).map(([id,item])=>`<section class="panel"><h2>${id}</h2><table><tr><th>Emergency</th><td>${item.emergency.status}</td></tr><tr><th>Level</th><td>${item.equipment.LevelM??item.equipment.level_m??0} m</td></tr><tr><th>Pending commands</th><td>${item.pending_commands.length}</td></tr></table><button class="danger" data-stop="${id}">Emergency stop</button></section>`).join('');host.querySelectorAll('[data-stop]').forEach((button)=>button.addEventListener('click',()=>stop(button.dataset.stop,button)));}
-load().catch((e)=>setMessage(message,e.message));
+async function registerLockout(chamber,form,button){
+  await withBusy(button,async()=>{
+    const devices=[...form.querySelectorAll('input[type=checkbox]:checked')].map((i)=>i.value);
+    const body={devices,reason:form.reason.value.trim(),requested_by:form.operator.value.trim()};
+    if(!body.reason||!body.requested_by){setMessage(message,'Reason and requesting operator are required');return;}
+    try{await api(`/api/chambers/${chamber}/lockouts`,{method:'POST',body:JSON.stringify(body)});setMessage(message,'');await load();}
+    catch(e){setMessage(message,e.message);}
+  });
+}
+async function decision(chamber,id,action,form,button){
+  await withBusy(button,async()=>{
+    const body={operator:form.operator.value.trim(),note:form.note.value.trim()};
+    if(!body.operator){setMessage(message,'Authorizing operator name is required');return;}
+    try{await api(`/api/chambers/${chamber}/lockouts/${id}/${action}`,{method:'POST',body:JSON.stringify(body)});setMessage(message,'');await load();}
+    catch(e){setMessage(message,e.message);}
+  });
+}
+function scopeText(lockout){return lockout.scope.devices?.length?lockout.scope.devices.join(', '):'<strong>whole chamber</strong>';}
+function lockoutRows(chamber,list,state){
+  return list.filter((l)=>l.state===state).map((l)=>`
+    <tr><td>${shortID(l.id)}</td><td>${scopeText(l)}</td><td>${esc(l.reason)}</td>
+    <td>${esc(l.requested_by)}${l.approved_by?' / '+esc(l.approved_by):''}</td>
+    <td>${stateAction(chamber,l,state)}</td></tr>`).join('');
+}
+function stateAction(chamber,l,state){
+  if(state==='pending'){return `<form class="inline" data-id="${l.id}">
+    <input name="operator" placeholder="Approver" required>
+    <button type="button" data-action="approve">Approve</button>
+    <button type="button" class="danger" data-action="reject">Reject</button>
+    <input name="note" placeholder="Reject note (optional)"></form>`;}
+  if(state==='active'){return `<form class="inline" data-id="${l.id}">
+    <input name="operator" placeholder="Releaser" required>
+    <input name="note" placeholder="Release note (optional)">
+    <button type="button" class="danger" data-action="release">Release after checks</button></form>`;}
+  return `${esc(l.released_by||l.approved_by||'')} ${esc(l.release_note||'')}`;
+}
+function historyRows(list){
+  return list.filter((l)=>l.state==='released'||l.state==='rejected').slice(0,6).map((l)=>
+    `<tr><td>${shortID(l.id)}</td><td>${l.state}</td><td>${scopeText(l)}</td><td>${esc(l.reason)}</td></tr>`).join('');
+}
+function panel(id,item){
+  const list=item.lockouts||[]; const active=list.filter((l)=>l.state==='active');
+  const blocked=active.length?`<span class="status critical">${active.length} active lockout(s)</span>`:'';
+  return `<section class="panel wide" data-chamber="${id}"><h2>${id} ${blocked}</h2>
+  <table><tr><th>Emergency</th><td>${item.emergency.status}</td></tr>
+  <tr><th>Level</th><td>${item.equipment.LevelM??item.equipment.level_m??0} m</td></tr>
+  <tr><th>Pending commands</th><td>${item.pending_commands.length}</td></tr></table>
+  <button class="danger" data-stop="${id}">Emergency stop</button>
+
+  <h3>Register maintenance lockout</h3>
+  <form data-register="${id}">
+    <div class="device-row">${DEVICES.map(([value,label])=>`<label class="check"><input type="checkbox" value="${value}"> ${label}</label>`).join('')}</div>
+    <div class="muted">No boxes checked = whole chamber. Approval blocks the selected gates/valves and cancels their queued commands.</div>
+    <div class="form-row"><div><label>Reason</label><input name="reason" placeholder="e.g. replace upstream gate seal" required></div>
+    <div><label>Requested by</label><input name="operator" placeholder="Field tech name" required></div>
+    <div><label>&nbsp;</label><button type="submit">Register</button></div></div>
+  </form>
+
+  <h3>Pending approval</h3><table><thead><tr><th>ID</th><th>Equipment</th><th>Reason</th><th>Requested / by</th><th>Decision</th></tr></thead>
+  <tbody>${lockoutRows(id,list,'pending')||'<tr><td colspan="5" class="muted">None</td></tr>'}</tbody></table>
+
+  <h3>Active lockouts — commands blocked</h3><table><thead><tr><th>ID</th><th>Equipment</th><th>Reason</th><th>Approved by</th><th>Release</th></tr></thead>
+  <tbody>${lockoutRows(id,list,'active')||'<tr><td colspan="5" class="muted">None</td></tr>'}</tbody></table>
+
+  <h3>Recent history</h3><table><thead><tr><th>ID</th><th>State</th><th>Equipment</th><th>Reason</th></tr></thead>
+  <tbody>${historyRows(list)||'<tr><td colspan="4" class="muted">None</td></tr>'}</tbody></table>
+  </section>`;
+}
+async function load(){
+  const data=await api('/api/interlocks');
+  host.innerHTML=Object.entries(data).filter(([k])=>k!=='signal_handoffs').map(([id,item])=>panel(id,item)).join('');
+  host.querySelectorAll('[data-stop]').forEach((b)=>b.addEventListener('click',()=>stop(b.dataset.stop,b)));
+  host.querySelectorAll('form[data-register]').forEach((form)=>form.addEventListener('submit',(e)=>{e.preventDefault();registerLockout(form.dataset.register,form,form.querySelector('button'));}));
+  host.querySelectorAll('form.inline').forEach((form)=>form.querySelectorAll('button[data-action]').forEach((button)=>{
+    const id=form.dataset.id;
+    const chamber=button.closest('section').dataset.chamber;
+    button.addEventListener('click',()=>decision(chamber,id,button.dataset.action,form,button));
+  }));
+  health.textContent='Updated '+new Date().toLocaleTimeString(); health.className='status';
+}
+async function refresh(){try{await load();setMessage(message,'');}catch(e){health.textContent='Connection error';health.className='status critical';setMessage(message,e.message);}}
+refresh(); setInterval(refresh,4000);
 </script></body></html>

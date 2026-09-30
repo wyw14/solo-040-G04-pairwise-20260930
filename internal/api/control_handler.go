@@ -6,6 +6,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/wyw14/cry-96/internal/lockout"
 	"github.com/wyw14/cry-96/internal/model"
 )
 
@@ -19,11 +20,20 @@ func openGateHandler(runtime *Runtime) http.HandlerFunc {
 		}
 		command, err := runtime.Interlocks.RequestOpen(r.Context(), mustCurrent(runtime, chamberID), direction, "http:"+requestID(r.Context()))
 		if err != nil {
-			writeError(w, http.StatusConflict, err)
+			writeError(w, commandFailureStatus(err), err)
 			return
 		}
 		writeJSON(w, http.StatusAccepted, command)
 	}
+}
+
+// commandFailureStatus maps maintenance lockouts to 423 Locked and leaves all
+// other rejections at 409 Conflict.
+func commandFailureStatus(err error) int {
+	if errors.Is(err, lockout.ErrDeviceLocked) {
+		return http.StatusLocked
+	}
+	return http.StatusConflict
 }
 
 func mustCurrent(runtime *Runtime, chamberID string) model.TransitCycle {

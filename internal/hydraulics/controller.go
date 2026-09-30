@@ -6,10 +6,18 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/wyw14/cry-96/internal/gate"
 	"github.com/wyw14/cry-96/internal/journal"
 	"github.com/wyw14/cry-96/internal/model"
 )
+
+// CommandAuthority atomically authorizes valve commands against active
+// maintenance lockouts. Implemented by *lockout.Registry.
+type CommandAuthority interface {
+	Guard(ctx context.Context, chamberID string, device model.DeviceKind, action string,
+		cycleID uuid.UUID, generation uint64, issue func() error) error
+}
 
 // Controller coordinates valve commands, level windows and ramp operations.
 type Controller struct {
@@ -18,6 +26,7 @@ type Controller struct {
 	recorder *journal.Recorder
 	windows  map[string]*LevelWindow
 	ramp     *Ramp
+	lockouts CommandAuthority
 	now      func() time.Time
 }
 
@@ -29,6 +38,14 @@ func NewController(commands *gate.Commands, recorder *journal.Recorder, ramp *Ra
 		commands: commands, recorder: recorder, windows: make(map[string]*LevelWindow),
 		ramp: ramp, now: now,
 	}
+}
+
+// BindLockouts routes every valve command through the maintenance-lockout
+// authority so the blocked check and command issuance stay atomic.
+func (c *Controller) BindLockouts(authority CommandAuthority) {
+	c.mu.Lock()
+	c.lockouts = authority
+	c.mu.Unlock()
 }
 
 func (c *Controller) window(chamberID string) (*LevelWindow, error) {
@@ -84,12 +101,21 @@ func (c *Controller) IssueValve(ctx context.Context, cycle model.TransitCycle, t
 		device = model.DeviceDrainValve
 		target = -target
 	}
-	command, err := c.commands.Issue(cycle, device, "set_opening", target, c.now())
-	if err != nil {
+	issue := func() error {
+		command, err := c.commands.Issue(cycle, device, "set_opening", target, c.now())
+		if err != nil {
+			return err
+		}
+		_, err = c.recorder.Record(ctx, cycle.ChamberID, model.EventCommandQueued, cycle.ID, cycle.Generation, command)
 		return err
 	}
-	_, err = c.recorder.Record(ctx, cycle.ChamberID, model.EventCommandQueued, cycle.ID, cycle.Generation, command)
-	return err
+	c.mu.RLock()
+	authority := c.lockouts
+	c.mu.RUnlock()
+	if authority == nil {
+		return issue()
+	}
+	return authority.Guard(ctx, cycle.ChamberID, device, "set_opening", cycle.ID, cycle.Generation, issue)
 }
 
 func (c *Controller) RampTo(ctx context.Context, cycle model.TransitCycle, targets []float64) (RampResult, error) {

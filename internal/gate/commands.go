@@ -87,13 +87,32 @@ func (c *Commands) Settle(ack model.DeviceAck, now time.Time) (model.DeviceComma
 }
 
 func (c *Commands) CancelChamber(chamberID string, now time.Time) []model.DeviceCommand {
+	return c.cancelMatching(chamberID, nil, now)
+}
+
+// CancelDevices cancels non-terminal commands for the listed devices. An empty
+// device list cancels every device in the chamber (a chamber-wide lockout).
+func (c *Commands) CancelDevices(chamberID string, devices []model.DeviceKind, now time.Time) []model.DeviceCommand {
+	return c.cancelMatching(chamberID, devices, now)
+}
+
+func (c *Commands) cancelMatching(chamberID string, devices []model.DeviceKind, now time.Time) []model.DeviceCommand {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	covered := make(map[model.DeviceKind]struct{}, len(devices))
+	for _, device := range devices {
+		covered[device] = struct{}{}
+	}
 	var cancelled []model.DeviceCommand
 	for _, commandID := range c.byChamber[chamberID] {
 		command := c.byID[commandID]
 		if command.State.Terminal() {
 			continue
+		}
+		if len(covered) > 0 {
+			if _, ok := covered[command.Device]; !ok {
+				continue
+			}
 		}
 		if command.SetState(model.CommandCancelled, now) == nil {
 			c.byID[commandID] = command

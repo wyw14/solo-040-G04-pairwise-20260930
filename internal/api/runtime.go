@@ -11,6 +11,7 @@ import (
 	"github.com/wyw14/cry-96/internal/interlock"
 	"github.com/wyw14/cry-96/internal/journal"
 	"github.com/wyw14/cry-96/internal/lease"
+	"github.com/wyw14/cry-96/internal/lockout"
 	"github.com/wyw14/cry-96/internal/model"
 	"github.com/wyw14/cry-96/internal/monitor"
 	"github.com/wyw14/cry-96/internal/safety"
@@ -39,6 +40,8 @@ type Runtime struct {
 	Leases          *lease.Service
 	LeaseSweeper    *lease.Sweeper
 	Safety          *safety.Service
+	Lockouts        *lockout.Registry
+	LockoutRecovery *lockout.Recovery
 	Snapshot        *monitor.Snapshot
 	Incidents       *monitor.IncidentReview
 	Health          *monitor.HealthRegistry
@@ -72,6 +75,13 @@ func NewRuntime(ctx context.Context, dataDirectory string) (*Runtime, error) {
 	ramp := hydraulics.NewRamp(25*time.Millisecond, now)
 	hydraulicsController := hydraulics.NewController(gateCommands, recorder, ramp, now)
 	barrier := safety.NewBarrier()
+	// The maintenance-lockout authority is created before the interlock and
+	// hydraulics coordinators so every gate/valve command is authorized
+	// against it. Approving a lockout cancels queued commands for its scope.
+	lockoutRegistry := lockout.NewRegistry(recorder, func(chamberID string, devices []model.DeviceKind, at time.Time) {
+		gateCommands.CancelDevices(chamberID, devices, at)
+	}, now)
+	hydraulicsController.BindLockouts(lockoutRegistry)
 	var safetyCoordinator *safety.Coordinator
 	levelByChamber := func(chamberID string) float64 {
 		samples := hydraulicsController.WindowSamples(chamberID)
@@ -85,8 +95,11 @@ func NewRuntime(ctx context.Context, dataDirectory string) (*Runtime, error) {
 	}
 	interlockCoordinator := interlock.NewCoordinator(
 		interlock.DefaultPolicy(), interlock.NewArbiter(), gateController,
-		levelByChamber, emergencyActive,
+		levelByChamber, emergencyActive, lockoutRegistry,
 	)
+	// Releasing a lockout still requires the standing level/opposite-gate/
+	// emergency checks; binding them keeps the registry free of safety deps.
+	lockoutRegistry.BindClearance(interlockCoordinator.Clearance)
 	cycleCoordinator := cycle.NewCoordinator(gateController, hydraulicsController, recorder, now)
 	cycleService := cycle.NewService(cycleCoordinator, admissionService)
 	safetyCoordinator = safety.NewCoordinator(gateCommands, barrier, recorder, now)
@@ -95,6 +108,10 @@ func NewRuntime(ctx context.Context, dataDirectory string) (*Runtime, error) {
 	replayer := journal.NewReplayer(store)
 	recovery := cycle.NewRecovery(replayer, cycleCoordinator)
 	if _, err := recovery.RestoreAll(ctx); err != nil {
+		return nil, err
+	}
+	lockoutRecovery := lockout.NewRecovery(replayer, lockoutRegistry)
+	if _, err := lockoutRecovery.RestoreAll(ctx); err != nil {
 		return nil, err
 	}
 	health := monitor.NewHealthRegistry()
@@ -114,7 +131,8 @@ func NewRuntime(ctx context.Context, dataDirectory string) (*Runtime, error) {
 		Planner: planner, Schedule: scheduleService, Hydraulics: hydraulicsController,
 		Interlocks: interlockCoordinator, Cycles: cycleCoordinator, CycleService: cycleService,
 		Leases: leaseService, LeaseSweeper: leaseSweeper, Safety: safetyService,
-		Snapshot:  monitor.NewSnapshot(cycleCoordinator, gateState, admissionService, signalService, safetyService, now),
+		Lockouts: lockoutRegistry, LockoutRecovery: lockoutRecovery,
+		Snapshot:  monitor.NewSnapshot(cycleCoordinator, gateState, admissionService, signalService, safetyService, lockoutRegistry, now),
 		Incidents: monitor.NewIncidentReview(store), Health: health, Recovery: recovery,
 		Chambers: chambers, Now: now,
 	}, nil
